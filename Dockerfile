@@ -1,7 +1,7 @@
 # =====================================================================
 # Dockerfile para FastAPI - API Gateway Zeus & Reportes
 # =====================================================================
-FROM python:3.10-slim
+FROM python:3.10-slim-bookworm
 
 # Evitar la generación de archivos .pyc y habilitar logs inmediatos
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -27,11 +27,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tdsodbc \
     libgl1 \
     libglib2.0-0 \
-    wkhtmltopdf \
+    fontconfig \
+    libxrender1 \
+    libxext6 \
     && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
     && curl -fsSL https://packages.microsoft.com/config/debian/12/prod.list > /etc/apt/sources.list.d/mssql-release.list \
     && apt-get update \
     && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 \
+    && curl -fsSL -o /tmp/wkhtmltox.deb https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.bookworm_amd64.deb \
+    && apt-get install -y --no-install-recommends /tmp/wkhtmltox.deb \
+    && rm -f /tmp/wkhtmltox.deb \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
