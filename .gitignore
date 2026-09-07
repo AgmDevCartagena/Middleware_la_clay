@@ -1,0 +1,6 @@
+.venv
+
+controlio*.json
+.env
+generated_reports/
+

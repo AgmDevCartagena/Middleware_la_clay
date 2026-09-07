@@ -1,0 +1,22 @@
+requests
+opencv-python
+pyodbc
+fastapi
+pydantic
+pydantic[email]
+uvicorn
+
+supabase
+typer
+#for loading environment variables  #new
+python-dotenv
+paramiko
+# debug
+debugpy
+pandas
+openpyxl
+gspread
+gspread-dataframe
+oauth2client
+jinja2
+pdfkit
