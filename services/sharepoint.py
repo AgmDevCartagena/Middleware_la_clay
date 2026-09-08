@@ -115,14 +115,16 @@ class SharePointService:
             return f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{self.drive_id}"
         return f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive"
 
-    def upload_file(self, file_bytes: io.BytesIO, filename: str, folder_path: Optional[str] = None) -> Dict[str, Any]:
+    def upload_file(self, file_bytes: io.BytesIO, filename: str, folder_path: Optional[str] = None, max_retries: int = 3) -> Dict[str, Any]:
         """
         Sube un archivo a SharePoint utilizando Microsoft Graph API.
+        Reintenta ante errores transitorios de Graph (ej: 400 'root:' segment,
+        429 throttling, 5xx) antes de propagar la excepción al llamador.
         """
         token = self.get_access_token()
         folder = folder_path.strip("/\\") if folder_path is not None else self.folder_path
         base_drive_url = self._get_drive_base_url()
-        
+
         # Endpoint para subida de contenido en SharePoint
         if folder:
             upload_url = f"{base_drive_url}/root:/{folder}/{filename}:/content"
@@ -138,13 +140,18 @@ class SharePointService:
         file_bytes.seek(0)
         content = file_bytes.read()
 
-        response = requests.put(upload_url, headers=headers, data=content, timeout=60)
-        if response.status_code not in (200, 201):
-            raise RuntimeError(
-                f"Error al subir el archivo a SharePoint ({response.status_code}): {response.text}"
-            )
+        last_error: Optional[str] = None
+        for attempt in range(1, max_retries + 1):
+            response = requests.put(upload_url, headers=headers, data=content, timeout=60)
+            if response.status_code in (200, 201):
+                return response.json()
 
-        return response.json()
+            last_error = f"({response.status_code}): {response.text}"
+            # 429/5xx/400 'root:' suelen ser transitorios en Graph; reintentar con backoff
+            if attempt < max_retries:
+                time.sleep(1.5 * attempt)
+
+        raise RuntimeError(f"Error al subir el archivo a SharePoint {last_error}")
 
     def share_file_with_emails(self, item_id: str, emails: List[str], role: str = "read") -> Dict[str, Any]:
         """
