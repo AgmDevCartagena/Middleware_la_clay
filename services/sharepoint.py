@@ -1,10 +1,21 @@
 import io
 import os
+import re
 import time
 import requests
 from typing import List, Optional, Dict, Any
 from settings import settings
 from services.excel_exporter import save_excel_to_disk
+
+# Caracteres inválidos para nombres de archivo en SharePoint/Graph. ':' es
+# especialmente crítico: Graph lo usa como delimitador de sintaxis en el
+# direccionamiento por path ('root:/carpeta/archivo:/content'), así que un
+# ':' dentro del propio nombre de archivo rompe el parseo de la URL entera
+# y Graph responde 400 "Resource not found for the segment 'root:'".
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*]')
+
+def _sanitize_filename(name: str) -> str:
+    return _INVALID_FILENAME_CHARS.sub("_", name)
 
 class SharePointService:
     """
@@ -123,6 +134,7 @@ class SharePointService:
         """
         token = self.get_access_token()
         folder = folder_path.strip("/\\") if folder_path is not None else self.folder_path
+        filename = _sanitize_filename(filename)
         base_drive_url = self._get_drive_base_url()
 
         # Endpoint para subida de contenido en SharePoint

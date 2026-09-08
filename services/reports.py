@@ -1,3 +1,4 @@
+import re
 import pandas as pd
 from settings import settings
 from  services.gsheets import dataframe_to_google_sheets, dataframes_to_google_sheets
@@ -24,7 +25,7 @@ def fetch_trucks_control(date_ref,emails):
         
         # Generar nombre de archivo con extensión .xlsx
         now = datetime.now().strftime("%Y%m%d%H%M%S")
-        clean_date = str(date_ref).replace("-", "")
+        clean_date = re.sub(r'[^0-9A-Za-z]', '', str(date_ref))
         filename = f'Reporte_control_camiones_{clean_date}_{now}.xlsx'
         
         # Generar Excel en memoria y entregar (SharePoint o Local)
@@ -56,7 +57,7 @@ def fetch_vehicle_control(date_ref,emails):
         
         # Generar nombre de archivo con extensión .xlsx
         now = datetime.now().strftime("%Y%m%d%H%M%S")
-        clean_date = str(date_ref).replace("-", "")
+        clean_date = re.sub(r'[^0-9A-Za-z]', '', str(date_ref))
         filename = f'Reporte_control_vehicular_{clean_date}_{now}.xlsx'
         
         # Generar Excel en memoria y entregar (SharePoint o Local)
@@ -108,7 +109,7 @@ def fetch_order_information(date_ref,emails):
             df = pd.concat([df, new_rows], ignore_index=True)
         # Generar nombre de archivo con extensión .xlsx
         now = datetime.now().strftime("%Y%m%d%H%M%S")
-        clean_date = str(date_ref).replace("-", "")
+        clean_date = re.sub(r'[^0-9A-Za-z]', '', str(date_ref))
         filename = f'Reporte_programacion_diaria_{clean_date}_{now}.xlsx'
         
         # Generar Excel en memoria y entregar (SharePoint o Local)
@@ -164,7 +165,7 @@ def fetch_loading_distribution(date_ref,emails):
 
         # Generar nombre de archivo con extensión .xlsx
         now = datetime.now().strftime("%Y%m%d%H%M%S")
-        clean_date = str(date_ref).replace("-", "")
+        clean_date = re.sub(r'[^0-9A-Za-z]', '', str(date_ref))
         filename = f'Informe_distribuidores_{clean_date}_{now}.xlsx'
         
         # Generar Excel en memoria y entregar (SharePoint o Local)
