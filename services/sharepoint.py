@@ -25,6 +25,9 @@ class SharePointService:
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0.0
 
+        # Cache del site_id ya resuelto a ID compuesto (hostname,guid,guid)
+        self._resolved_site_id: Optional[str] = None
+
     def is_configured(self) -> bool:
         """
         Verifica si las variables de entorno necesarias para conectar a SharePoint
@@ -71,14 +74,46 @@ class SharePointService:
         self._token_expires_at = time.time() + data.get("expires_in", 3600)
         return self._access_token
 
+    def _resolve_site_id(self) -> str:
+        """
+        Resuelve self.site_id a un ID compuesto de Graph (hostname,site-guid,web-guid).
+
+        Si SHAREPOINT_SITE_ID viene en formato de path (contiene ':', ej.
+        'hostname:/sites/nombre:'), Graph no permite combinarlo con un segundo
+        segmento ':...:' como 'root:/carpeta/archivo:' en la misma request. Por
+        eso se resuelve una sola vez a su ID compuesto real y se cachea.
+        """
+        if self._resolved_site_id:
+            return self._resolved_site_id
+
+        if ":" not in self.site_id:
+            self._resolved_site_id = self.site_id
+            return self._resolved_site_id
+
+        token = self.get_access_token()
+        resolve_url = f"https://graph.microsoft.com/v1.0/sites/{self.site_id}"
+        response = requests.get(
+            resolve_url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Error al resolver SHAREPOINT_SITE_ID ({response.status_code}): {response.text}"
+            )
+
+        self._resolved_site_id = response.json()["id"]
+        return self._resolved_site_id
+
     def _get_drive_base_url(self) -> str:
         """
         Retorna la URL base del Drive en Graph API.
         Si DRIVE_ID está configurado lo utiliza; de lo contrario utiliza la biblioteca por defecto del sitio.
         """
+        site_id = self._resolve_site_id()
         if self.drive_id:
-            return f"https://graph.microsoft.com/v1.0/sites/{self.site_id}/drives/{self.drive_id}"
-        return f"https://graph.microsoft.com/v1.0/sites/{self.site_id}/drive"
+            return f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{self.drive_id}"
+        return f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive"
 
     def upload_file(self, file_bytes: io.BytesIO, filename: str, folder_path: Optional[str] = None) -> Dict[str, Any]:
         """
