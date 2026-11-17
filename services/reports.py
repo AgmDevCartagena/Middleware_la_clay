@@ -124,6 +124,118 @@ def fetch_order_information(date_ref,emails):
         return [{"success": False, "error": str(e)}]
 
 
+#get_order_information_interval
+
+def fetch_rpc_paginated(function_name: str, params: dict, batch_size: int = 1000) -> list:
+    """
+    Llama un RPC de Supabase que recibe 'offset_val' y 'limit_val' y
+    acumula todas las páginas hasta que no lleguen más filas.
+    """
+    offset = 0
+    all_data = []
+    while True:
+        page_params = {**params, 'offset_val': offset, 'limit_val': batch_size}
+        data = supabase.rpc(function_name, page_params).execute()
+        rows = data.data or []
+        all_data.extend(rows)
+        if len(rows) < batch_size:
+            break
+        offset += batch_size
+    return all_data
+
+
+ORDER_TIME_COLUMNS = [
+    'hora_entrega_orden', 'hora_entrada', 'hora_cargue', 'hora_conteo', 'hora_salida',
+    'tiempo_planta_min', 'tiempo_total_min',
+]
+ORDER_LEVEL_COLUMNS = [
+    'orden', 'fecha_programacion', 'jornada', 'placa', 'conductor', 'descripcion', 'estado',
+]
+
+
+def _join_list(value):
+    """Convierte una lista (array de Postgres) en texto separado por comas."""
+    if isinstance(value, list):
+        return ', '.join(str(v) for v in value if v is not None)
+    return value if value is not None else ''
+
+
+def fetch_order_information_interval(start_date: str, end_date: str, emails: List[str]):
+    try:
+        # Validar formato de fechas (YYYY-MM-DD)
+        start_obj = datetime.strptime(start_date, '%Y-%m-%d')
+        end_obj = datetime.strptime(end_date, '%Y-%m-%d')
+        if start_obj > end_obj:
+            raise ValueError("start_date no puede ser mayor que end_date.")
+
+        rows = fetch_rpc_paginated('get_order_information_interval', {
+            'start_date': start_date,
+            'end_date': end_date,
+        })
+        df = pd.DataFrame(rows)
+
+        if df.empty:
+            raise ValueError("No se encontraron datos para el rango de fechas proporcionado.")
+
+        # Arrays de Postgres -> texto legible en Excel
+        for col in ['pedido', 'factura', 'remision']:
+            if col in df.columns:
+                df[col] = df[col].apply(_join_list)
+
+        for col in ['hora_entrega_orden', 'hora_entrada', 'hora_cargue', 'hora_conteo', 'hora_salida']:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+
+        # Hoja 1: Programación (una fila por producto, sin tiempos)
+        df_prog = df.drop(columns=[c for c in ORDER_TIME_COLUMNS if c in df.columns])
+
+        # Agregar vehículos activos sin programación en el rango
+        vehicles = supabase.rpc('get_active_company_vehicles').execute()
+        df_v = pd.DataFrame(vehicles.data or [])
+        if 'placa' in df_prog.columns and 'plate' in df_v.columns:
+            missing = df_v.loc[~df_v['plate'].isin(df_prog['placa']), 'plate']
+            if not missing.empty:
+                df_prog = pd.concat(
+                    [df_prog, pd.DataFrame({'placa': missing.values})],
+                    ignore_index=True,
+                )
+
+        # Hoja 2: Tiempos por orden (una fila por orden)
+        order_cols = [c for c in ORDER_LEVEL_COLUMNS + ORDER_TIME_COLUMNS if c in df.columns]
+        df_times = (
+            df[order_cols]
+            .drop_duplicates(subset='orden')
+            .sort_values(['fecha_programacion', 'orden'])
+            .reset_index(drop=True)
+        )
+        for col in ['tiempo_planta_min', 'tiempo_total_min']:
+            if col in df_times.columns:
+                df_times[col] = df_times[col].astype('Int64')  # conserva vacíos sin volverlos 0
+
+        # Horas como texto legible: algunos visores muestran el número serial de Excel
+        for col in ['hora_entrega_orden', 'hora_entrada', 'hora_cargue', 'hora_conteo', 'hora_salida']:
+            if col in df_times.columns:
+                df_times[col] = df_times[col].dt.strftime('%d/%m/%Y %H:%M').fillna('')
+
+        # Nombre de archivo y entrega
+        now = datetime.now().strftime("%Y%m%d%H%M%S")
+        clean_start = start_date.replace("-", "")
+        clean_end = end_date.replace("-", "")
+        filename = f'Reporte_programacion_diaria_{clean_start}_{clean_end}_{now}.xlsx'
+
+        buffer = dataframes_to_excel_buffer(
+            dfs=[df_prog, df_times],
+            sheet_titles=["Programacion", "Tiempos por orden"],
+        )
+        result = sharepoint_service.export_and_deliver(buffer, filename, emails)
+
+        return [result]
+
+    except Exception as e:
+        print(f"Error al generar el reporte de programacion por rango de fechas: {e}")
+        return [{"success": False, "error": str(e)}]
+
+
 
 #report_loading_distribution
 

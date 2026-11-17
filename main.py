@@ -11,7 +11,7 @@ from crud.cameras import fecthCamerabyDoorId
 
 from services.zeus import getDocument, getInvoice, getEmpleado
 from services.takephotos import takephoto
-from services.reports import fetch_trucks_control, fetch_loading_distribution, fetch_order_information, fetch_vehicle_control, fetch_load_report_driver_by_month,fetch_loading_distribution_interval
+from services.reports import fetch_trucks_control, fetch_loading_distribution, fetch_order_information, fetch_vehicle_control, fetch_load_report_driver_by_month,fetch_loading_distribution_interval, fetch_order_information_interval
 from services.zClients import getCreditLimitForClient, getAccountBalanceForClient
 from settings import settings
 from dependencies import get_token_header
@@ -136,6 +136,17 @@ async def make_report_order_information(request_data:ReportControlRequest,x_toke
     date_ref = request_data.date_ref
     emails = request_data.emails
     result = fetch_order_information(date_ref,emails)
+    return result
+
+# Reporte de programacion por rango de fechas (con tiempos de operacion)
+@app.post("/make_report_daily_programming_interval/")
+async def make_report_daily_programming_interval(request_data:ReportControlRequest,x_token: str = Depends(verify_token)):
+    # Si no llega rango, usar date_ref como inicio y fin
+    start_date = request_data.start_date or request_data.date_ref
+    end_date = request_data.end_date or request_data.date_ref
+    if not start_date or not end_date:
+        raise HTTPException(status_code=400, detail="Debe enviar start_date y end_date (o date_ref).")
+    result = fetch_order_information_interval(start_date, end_date, request_data.emails)
     return result
 
 # Reporte de incentivos conductores
