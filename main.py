@@ -11,7 +11,7 @@ from crud.cameras import fecthCamerabyDoorId
 
 from services.zeus import getDocument, getInvoice, getEmpleado
 from services.takephotos import takephoto
-from services.reports import fetch_trucks_control, fetch_loading_distribution, fetch_order_information, fetch_vehicle_control, fetch_load_report_driver_by_month,fetch_loading_distribution_interval, fetch_order_information_interval
+from services.reports import fetch_trucks_control, fetch_loading_distribution, fetch_order_information, fetch_vehicle_control, fetch_load_report_driver_by_month,fetch_loading_distribution_interval, fetch_order_information_interval, fetch_consolidated_interval
 from services.zClients import getCreditLimitForClient, getAccountBalanceForClient
 from settings import settings
 from dependencies import get_token_header
@@ -147,6 +147,16 @@ async def make_report_daily_programming_interval(request_data:ReportControlReque
     if not start_date or not end_date:
         raise HTTPException(status_code=400, detail="Debe enviar start_date y end_date (o date_ref).")
     result = fetch_order_information_interval(start_date, end_date, request_data.emails)
+    return result
+
+# Reporte consolidado: distribuidores + vehiculos propios + externos, por rango de fechas
+@app.post("/make_report_consolidated_interval/")
+async def make_report_consolidated_interval(request_data:ReportControlRequest,x_token: str = Depends(verify_token)):
+    start_date = request_data.start_date or request_data.date_ref
+    end_date = request_data.end_date or request_data.date_ref
+    if not start_date or not end_date:
+        raise HTTPException(status_code=400, detail="Debe enviar start_date y end_date (o date_ref).")
+    result = fetch_consolidated_interval(start_date, end_date, request_data.emails)
     return result
 
 # Reporte de incentivos conductores

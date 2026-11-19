@@ -144,12 +144,23 @@ def fetch_rpc_paginated(function_name: str, params: dict, batch_size: int = 1000
     return all_data
 
 
-ORDER_TIME_COLUMNS = [
-    'hora_entrega_orden', 'hora_entrada', 'hora_cargue', 'hora_conteo', 'hora_salida',
-    'tiempo_planta_min', 'tiempo_total_min',
-]
+HOUR_COLUMNS = ['hora_entrega_orden', 'hora_entrada', 'hora_cargue', 'hora_conteo', 'hora_salida']
+
+# Duraciones por etapa (minutos): nombre -> (hora_fin, hora_inicio)
+# Mismas definiciones que el reporte de distribuidores.
+STAGE_DURATIONS = {
+    'tiempo_espera_min': ('hora_entrada', 'hora_entrega_orden'),
+    'tiempo_cargue_min': ('hora_cargue', 'hora_entrada'),
+    'tiempo_conteo_min': ('hora_conteo', 'hora_cargue'),
+    'tiempo_salida_min': ('hora_salida', 'hora_conteo'),
+    'tiempo_planta_min': ('hora_salida', 'hora_entrada'),
+    'tiempo_total_min': ('hora_salida', 'hora_entrega_orden'),
+}
+DURATION_COLUMNS = list(STAGE_DURATIONS.keys())
+
+ORDER_TIME_COLUMNS = HOUR_COLUMNS + DURATION_COLUMNS
 ORDER_LEVEL_COLUMNS = [
-    'orden', 'fecha_programacion', 'jornada', 'placa', 'conductor', 'descripcion', 'estado',
+    'orden', 'fecha_programacion', 'jornada', 'placa', 'conductor', 'descripcion', 'estado', 'estado_orden',
 ]
 
 
@@ -160,8 +171,53 @@ def _join_list(value):
     return value if value is not None else ''
 
 
+def _parse_hours(df: pd.DataFrame) -> pd.DataFrame:
+    for col in HOUR_COLUMNS:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+    return df
+
+
+def _format_hours(df: pd.DataFrame) -> pd.DataFrame:
+    """Horas como texto legible: algunos visores muestran el número serial de Excel."""
+    for col in HOUR_COLUMNS:
+        if col in df.columns and pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].dt.strftime('%d/%m/%Y %H:%M').fillna('')
+    return df
+
+
+def _add_stage_durations(df: pd.DataFrame) -> pd.DataFrame:
+    """Calcula duraciones en minutos; si falta alguna hora queda vacío (no 0)."""
+    for name, (end_col, start_col) in STAGE_DURATIONS.items():
+        if end_col in df.columns and start_col in df.columns:
+            minutes = (df[end_col] - df[start_col]).dt.total_seconds() / 60
+            df[name] = minutes.round().astype('Int64')
+    return df
+
+
+def _derive_estado(df: pd.DataFrame, status_col: str = 'estado_orden') -> pd.Series:
+    """Estado operativo a partir de las horas (loading_order.status solo trae EN TRANSITO / CANCELADA)."""
+    def _estado(row):
+        if str(row.get(status_col) or '').upper() == 'CANCELADA':
+            return 'CANCELADA'
+        if pd.notnull(row.get('hora_salida')):
+            return 'DESPACHADO'
+        if pd.notnull(row.get('hora_conteo')):
+            return 'CONTADO - PENDIENTE SALIDA'
+        if pd.notnull(row.get('hora_cargue')):
+            return 'CARGADO - EN CONTEO'
+        if pd.notnull(row.get('hora_entrada')):
+            return 'EN PLANTA - EN CARGUE'
+        return 'SIN INGRESO'
+    return df.apply(_estado, axis=1)
+
+
 def fetch_order_information_interval(start_date: str, end_date: str, emails: List[str]):
     try:
+        # Aceptar 'YYYY-MM-DD' o DateTime completo ('2026-11-17 16:16:47.000', '2026-11-17T16:16:47')
+        start_date = str(start_date).strip()[:10]
+        end_date = str(end_date).strip()[:10]
+
         # Validar formato de fechas (YYYY-MM-DD)
         start_obj = datetime.strptime(start_date, '%Y-%m-%d')
         end_obj = datetime.strptime(end_date, '%Y-%m-%d')
@@ -182,12 +238,15 @@ def fetch_order_information_interval(start_date: str, end_date: str, emails: Lis
             if col in df.columns:
                 df[col] = df[col].apply(_join_list)
 
-        for col in ['hora_entrega_orden', 'hora_entrada', 'hora_cargue', 'hora_conteo', 'hora_salida']:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
+        # Duraciones por etapa y estado operativo (el status del sistema queda como estado_orden)
+        df = _parse_hours(df)
+        df = _add_stage_durations(df)
+        if 'estado' in df.columns:
+            df = df.rename(columns={'estado': 'estado_orden'})
+        df['estado'] = _derive_estado(df)
 
         # Hoja 1: Programación (una fila por producto, sin tiempos)
-        df_prog = df.drop(columns=[c for c in ORDER_TIME_COLUMNS if c in df.columns])
+        df_prog = df.drop(columns=[c for c in ORDER_TIME_COLUMNS + ['estado_orden'] if c in df.columns])
 
         # Agregar vehículos activos sin programación en el rango
         vehicles = supabase.rpc('get_active_company_vehicles').execute()
@@ -208,14 +267,7 @@ def fetch_order_information_interval(start_date: str, end_date: str, emails: Lis
             .sort_values(['fecha_programacion', 'orden'])
             .reset_index(drop=True)
         )
-        for col in ['tiempo_planta_min', 'tiempo_total_min']:
-            if col in df_times.columns:
-                df_times[col] = df_times[col].astype('Int64')  # conserva vacíos sin volverlos 0
-
-        # Horas como texto legible: algunos visores muestran el número serial de Excel
-        for col in ['hora_entrega_orden', 'hora_entrada', 'hora_cargue', 'hora_conteo', 'hora_salida']:
-            if col in df_times.columns:
-                df_times[col] = df_times[col].dt.strftime('%d/%m/%Y %H:%M').fillna('')
+        df_times = _format_hours(df_times)
 
         # Nombre de archivo y entrega
         now = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -233,6 +285,99 @@ def fetch_order_information_interval(start_date: str, end_date: str, emails: Lis
 
     except Exception as e:
         print(f"Error al generar el reporte de programacion por rango de fechas: {e}")
+        return [{"success": False, "error": str(e)}]
+
+
+#get_consolidated_report_interval
+
+CONSOLIDATED_COLUMNS = [
+    'tipo', 'tipo_vehiculo', 'orden', 'fecha', 'cliente', 'placa', 'conductor', 'carroceria',
+    'tipo_carga', 'cantidad', 'referencia', 'producto', 'pedido', 'factura', 'remision',
+    'estado', 'estado_orden',
+] + ORDER_TIME_COLUMNS
+
+
+def _summary_by(df_orders: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    """Resumen por grupo: órdenes, vehículos, cantidades y promedio de cada tiempo (en minutos)."""
+    grouped = df_orders.groupby(group_col, dropna=False)
+    summary = pd.DataFrame({
+        'ordenes': grouped['orden'].nunique(),
+        'vehiculos': grouped['placa'].nunique(),
+        'cantidad': grouped['cantidad_orden'].sum(),
+        'despachadas': grouped['estado'].apply(lambda s: int((s == 'DESPACHADO').sum())),
+        'con_factura': grouped['factura'].apply(lambda s: int((s.fillna('') != '').sum())),
+        'con_remision': grouped['remision'].apply(lambda s: int((s.fillna('') != '').sum())),
+    })
+    for col in DURATION_COLUMNS:
+        if col in df_orders.columns:
+            summary[f'prom_{col}'] = grouped[col].apply(lambda s: s.astype('float').mean()).round(1)
+    return summary.reset_index()
+
+
+def fetch_consolidated_interval(start_date: str, end_date: str, emails: List[str]):
+    """
+    Reporte consolidado (distribuidores + vehículos propios + externos) por rango de fechas.
+    Hojas: Consolidado (tabla plana con filtros), Resumen por tipo, Resumen por estado.
+    """
+    try:
+        start_date = str(start_date).strip()[:10]
+        end_date = str(end_date).strip()[:10]
+        start_obj = datetime.strptime(start_date, '%Y-%m-%d')
+        end_obj = datetime.strptime(end_date, '%Y-%m-%d')
+        if start_obj > end_obj:
+            raise ValueError("start_date no puede ser mayor que end_date.")
+
+        rows = fetch_rpc_paginated('get_consolidated_report_interval', {
+            'start_date': start_date,
+            'end_date': end_date,
+        })
+        df = pd.DataFrame(rows)
+
+        if df.empty:
+            raise ValueError("No se encontraron datos para el rango de fechas proporcionado.")
+
+        for col in ['cliente', 'pedido', 'factura', 'remision', 'conductor']:
+            if col in df.columns:
+                df[col] = df[col].apply(_join_list)
+
+        # Duraciones se recalculan aquí (incluye tiempo_planta_min) para tener
+        # una sola definición compartida con la programación diaria.
+        df = _parse_hours(df)
+        df = _add_stage_durations(df)
+        df['cantidad'] = pd.to_numeric(df['cantidad'], errors='coerce').astype('Int64')
+
+        # Nivel orden (una fila por orden) para los resúmenes
+        df_orders = df.copy()
+        df_orders['cantidad_orden'] = df_orders.groupby('orden')['cantidad'].transform('sum')
+        df_orders = df_orders.drop_duplicates(subset='orden')
+
+        df_tipo = _summary_by(df_orders, 'tipo')
+        df_estado = df_orders.pivot_table(
+            index='estado', columns='tipo', values='orden', aggfunc='nunique', fill_value=0,
+        ).reset_index()
+        df_estado.columns.name = None
+
+        # Hoja plana (una fila por producto)
+        df_flat = df[[c for c in CONSOLIDATED_COLUMNS if c in df.columns]].copy()
+        df_flat = df_flat.sort_values(['fecha', 'tipo', 'orden']).reset_index(drop=True)
+        df_flat = _format_hours(df_flat)
+
+        now = datetime.now().strftime("%Y%m%d%H%M%S")
+        clean_start = start_date.replace("-", "")
+        clean_end = end_date.replace("-", "")
+        filename = f'Reporte_consolidado_{clean_start}_{clean_end}_{now}.xlsx'
+
+        buffer = dataframes_to_excel_buffer(
+            dfs=[df_flat, df_tipo, df_estado],
+            sheet_titles=["Consolidado", "Resumen por tipo", "Resumen por estado"],
+            filters=True,
+        )
+        result = sharepoint_service.export_and_deliver(buffer, filename, emails)
+
+        return [result]
+
+    except Exception as e:
+        print(f"Error al generar el reporte consolidado: {e}")
         return [{"success": False, "error": str(e)}]
 
 

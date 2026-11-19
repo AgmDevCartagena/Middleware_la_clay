@@ -56,9 +56,10 @@ def dataframe_to_excel_buffer(df: pd.DataFrame, sheet_name: str = "Datos") -> io
     buffer.seek(0)
     return buffer
 
-def dataframes_to_excel_buffer(dfs: List[pd.DataFrame], sheet_titles: List[str]) -> io.BytesIO:
+def dataframes_to_excel_buffer(dfs: List[pd.DataFrame], sheet_titles: List[str], filters: bool = False) -> io.BytesIO:
     """
     Convierte una lista de DataFrames en un libro de Excel con múltiples hojas.
+    filters=True agrega autofiltro en el encabezado y congela la primera fila.
     """
     if len(dfs) != len(sheet_titles):
         raise ValueError(
@@ -88,7 +89,11 @@ def dataframes_to_excel_buffer(dfs: List[pd.DataFrame], sheet_titles: List[str])
                 
             df_to_write.to_excel(writer, sheet_name=sheet_title, index=False)
             autofit_columns(writer, sheet_title, df_to_write)
-            
+            if filters and len(df_to_write.columns) > 0:
+                ws = writer.sheets[sheet_title]
+                ws.auto_filter.ref = ws.dimensions
+                ws.freeze_panes = "A2"
+
     buffer.seek(0)
     return buffer
 
