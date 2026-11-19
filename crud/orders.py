@@ -1,5 +1,5 @@
 
-from typing import List
+from typing import List, Optional
 from helpers.db_supabase import supabase
 
 
@@ -29,8 +29,23 @@ def deleteItemsOrder(order_id:int):
 
     return data[1]
 
-def fetchOrdersbyStatus(status:List[str]):
-    
-    data, count = supabase.table('orders').select('id').in_('status',status ).execute()
-
-    return data[1]
+def fetchOrdersbyStatus(status:Optional[List[str]], since:Optional[str]=None, batch_size:int=1000):
+    """
+    Pedidos filtrados por estado (None = cualquier estado) y fecha >= since (YYYY-MM-DD).
+    Pagina porque Supabase devuelve máximo 1000 filas por consulta.
+    Ordenados del más reciente al más antiguo.
+    """
+    all_rows = []
+    offset = 0
+    while True:
+        q = supabase.table('orders').select('id')
+        if status:
+            q = q.in_('status', status)
+        if since:
+            q = q.gte('date', since)
+        rows = q.order('date', desc=True).order('id', desc=True).range(offset, offset + batch_size - 1).execute().data or []
+        all_rows.extend(rows)
+        if len(rows) < batch_size:
+            break
+        offset += batch_size
+    return all_rows

@@ -24,6 +24,41 @@ def  getOrdersAll(CURRENT_ORDER_SYNC:int=0):
     
     return data
 
+def getOrdersChangedSince(since: str):
+    """
+    Pedidos que tuvieron movimiento en Zeus desde `since` (YYYY-MM-DD), sin importar
+    cuándo se crearon:
+      - pedidos creados desde esa fecha, o
+      - pedidos con una factura (TipoImportador=9) o remisión (TipoImportador=20)
+        emitida desde esa fecha.
+    """
+    sql = """
+        SELECT P.Consecutivo AS id
+        FROM PedidoDeCliente AS P
+        WHERE P.Fecha >= ?
+        UNION
+        SELECT D.Exportador AS id
+        FROM DOCUMENTOSRELACIONADOS AS D
+        INNER JOIN PedidoDeCliente AS P ON D.Exportador = P.Consecutivo
+        INNER JOIN FacturaDeCliente AS F ON D.Importador = F.Consecutivo
+        WHERE D.TipoImportador = 9 AND F.Fecha >= ?
+        UNION
+        SELECT D.Exportador AS id
+        FROM DOCUMENTOSRELACIONADOS AS D
+        INNER JOIN PedidoDeCliente AS P ON D.Exportador = P.Consecutivo
+        INNER JOIN Remision AS R ON D.Importador = R.Consecutivo
+        WHERE D.TipoImportador = 20 AND R.Fecha >= ?
+        ORDER BY id DESC
+    """
+    conn = connectdb(settings.DB_INVENTARIO)
+    try:
+        data = query(conn=conn, sql=sql, params=(since, since, since))
+    finally:
+        conn.close()
+    if isinstance(data, dict):
+        data = [data]
+    return data or []
+
 def  getOrderById(id:int):
     
     conn=connectdb(settings.DB_INVENTARIO)

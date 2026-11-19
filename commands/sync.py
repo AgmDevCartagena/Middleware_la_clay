@@ -1,4 +1,4 @@
-from services.zOrders import getOrdersAll, getOrderItems, getOrder,getOrderById
+from services.zOrders import getOrdersAll, getOrderItems, getOrder,getOrderById, getOrdersChangedSince
 from services.zDispatch import getDispatch,getDispatchItems,getDispatchAll
 from services.zProducts import getProductsAll, getProduct
 from services.zDocsRelations import getOrdersRelations
@@ -8,6 +8,7 @@ from crud import parameters
 from crud.products import upsertProducts
 from crud.orders import upsertOrderDocRelations
 from helpers.utils import datetime_serializer, decimal_serializer
+from datetime import datetime, timedelta
 
 def sync_products():
     num=0
@@ -136,12 +137,30 @@ def sync_dispatch(type:str):
 
 
 
-def sync_orders(type:str, id:int=None):
+def sync_orders(type:str, id:int=None, days:int=None, since:str=None):
+    """
+    type:
+      'Status' -> TODOS los pedidos Pendiente / Parcialmente Satisfecho (sin límite de fecha).
+                  Opcional: `days` o `since` para acotar. Actualiza estado, items y facturas/remisiones.
+      'Since'  -> Pedidos con movimiento en Zeus desde `since` (YYYY-MM-DD): creados, facturados
+                  o remitidos desde esa fecha, sin importar cuándo se crearon. Para rellenar lo faltante.
+      'All' / 'New' / 'One' -> comportamiento original.
+    """
     num=0
+    errors=0
     # buscar contador actual de orders
-    
+
     if type=='Status':
-        orders=fetchOrdersbyStatus(['Pendiente','Parcialmente Satisfecho'])
+        if since is None and days:
+            since = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        orders=fetchOrdersbyStatus(['Pendiente','Parcialmente Satisfecho'], since=since)
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Sync Status (desde {since or 'siempre'}): {len(orders)} pedidos")
+    elif type=='Since':
+        if not since:
+            raise ValueError("type='Since' requiere since=YYYY-MM-DD")
+        # Se consulta en Zeus (fuente de verdad): pedidos creados, facturados o remitidos desde `since`
+        orders=getOrdersChangedSince(since)
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Sync Since {since}: {len(orders)} pedidos con movimiento en Zeus")
     elif type =='All':
         # cargar todas las orders 
         print(f"Actualizando todos los Pedidos!!!!! ") 
@@ -165,14 +184,14 @@ def sync_orders(type:str, id:int=None):
     #print(orders)
     if orders is None:
         return None     
-    # recorrer orders
-    for order in orders:
+    # sincronizar un pedido (datos, items y documentos relacionados)
+    def _sync_one(order):
         order_id =int(order['id'])
         #cargar order
-        order_data=getOrder(order_id)  
+        order_data=getOrder(order_id)
         #crear dict order
         if order_data is None:
-            continue
+            return False
        
         print(f"Pedido #{order_id}")
         order_dict = {
@@ -235,7 +254,25 @@ def sync_orders(type:str, id:int=None):
 
         if (type=='New'):
             parameters.update('CURRENT_ORDER_SYNC',int(order['id']))
-        num=num+1
+        return True
+
+    # recorrer orders
+    for order in orders:
+        if type in ('Status', 'Since'):
+            # En sincronizaciones masivas un pedido con error no debe detener el resto
+            try:
+                if _sync_one(order):
+                    num=num+1
+            except Exception as e:
+                errors=errors+1
+                print(f"Error sincronizando pedido #{order.get('id')}: {e}")
+        else:
+            # New/One/All: comportamiento original (un error detiene, para no saltar pedidos en New)
+            if _sync_one(order):
+                num=num+1
+
+    if type in ('Status', 'Since'):
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Sync {type} terminado: {num} ok, {errors} con error")
     return num
 
 if __name__=='__main__':
