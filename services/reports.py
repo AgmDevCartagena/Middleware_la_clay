@@ -7,6 +7,9 @@ from services.sharepoint import sharepoint_service
 from datetime import datetime,timedelta
 from typing import List
 from helpers.db_supabase import supabase
+from services.factura_despacho import (
+    MARGEN_DIAS, _split, fetch_facturas_zeus, match_facturas, build_facturas,
+)
 
 def fetch_trucks_control(date_ref,emails):
     try:
@@ -314,6 +317,25 @@ def _summary_by(df_orders: pd.DataFrame, group_col: str) -> pd.DataFrame:
     return summary.reset_index()
 
 
+def _asignar_facturas_despacho(df: pd.DataFrame, d0, d1):
+    """Reemplaza la columna factura (todas las del pedido) por las facturas que salieron en
+    cada camión, según la fecha de factura en Zeus. Devuelve (df, hoja Facturas).
+    Si Zeus no responde, deja las facturas originales y lo avisa en la hoja Facturas."""
+    try:
+        pedidos = {p for v in df['pedido'] for p in _split(v)}
+        df_fact = fetch_facturas_zeus(pedidos)
+        out_all = match_facturas(df, df_fact)
+        df['factura'] = df['orden'].map(out_all.set_index('orden')['factura_nueva']).fillna('')
+        return df, build_facturas(out_all, df_fact, d0, d1)
+    except Exception as e:
+        print(f"Advertencia: no se pudo asignar facturas por despacho (Zeus): {e}")
+        aviso = pd.DataFrame({'aviso': [
+            f"No se pudo consultar Zeus ({e}). La columna factura del Consolidado muestra "
+            f"todas las facturas de cada pedido, no solo las del despacho."
+        ]})
+        return df, aviso
+
+
 def fetch_consolidated_interval(start_date: str, end_date: str, emails: List[str]):
     """
     Reporte consolidado (distribuidores + vehículos propios + externos) por rango de fechas.
@@ -327,9 +349,11 @@ def fetch_consolidated_interval(start_date: str, end_date: str, emails: List[str
         if start_obj > end_obj:
             raise ValueError("start_date no puede ser mayor que end_date.")
 
+        # Margen a cada lado: las facturas se emparejan también con despachos vecinos
+        # al rango, para no asignar a una orden del rango la factura de otro despacho.
         rows = fetch_rpc_paginated('get_consolidated_report_interval', {
-            'start_date': start_date,
-            'end_date': end_date,
+            'start_date': str((start_obj - timedelta(days=MARGEN_DIAS)).date()),
+            'end_date': str((end_obj + timedelta(days=MARGEN_DIAS)).date()),
         })
         df = pd.DataFrame(rows)
 
@@ -339,6 +363,12 @@ def fetch_consolidated_interval(start_date: str, end_date: str, emails: List[str
         for col in ['cliente', 'pedido', 'factura', 'remision', 'conductor']:
             if col in df.columns:
                 df[col] = df[col].apply(_join_list)
+
+        df, df_facturas = _asignar_facturas_despacho(df, start_obj.date(), end_obj.date())
+
+        df = df[pd.to_datetime(df['fecha']).dt.date.between(start_obj.date(), end_obj.date())].copy()
+        if df.empty:
+            raise ValueError("No se encontraron datos para el rango de fechas proporcionado.")
 
         # Duraciones se recalculan aquí (incluye tiempo_planta_min) para tener
         # una sola definición compartida con la programación diaria.
@@ -368,8 +398,8 @@ def fetch_consolidated_interval(start_date: str, end_date: str, emails: List[str
         filename = f'Reporte_consolidado_{clean_start}_{clean_end}_{now}.xlsx'
 
         buffer = dataframes_to_excel_buffer(
-            dfs=[df_flat, df_tipo, df_estado],
-            sheet_titles=["Consolidado", "Resumen por tipo", "Resumen por estado"],
+            dfs=[df_flat, df_facturas, df_tipo, df_estado],
+            sheet_titles=["Consolidado", "Facturas", "Resumen por tipo", "Resumen por estado"],
             filters=True,
         )
         result = sharepoint_service.export_and_deliver(buffer, filename, emails)
