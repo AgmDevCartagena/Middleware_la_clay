@@ -153,6 +153,11 @@ def build_facturas(out_all: pd.DataFrame, df_fact: pd.DataFrame, d0, d1) -> pd.D
     orden_en_rango = pd.to_datetime(fac['fecha_orden']).dt.date.between(d0, d1)
     fac = fac[en_rango | orden_en_rango].copy()
 
+    # Camiones de fuera del rango (margen) solo si la factura no salió en ningún camión del rango
+    fac['_orden_en_rango'] = orden_en_rango.loc[fac.index].fillna(False)
+    con_camion_rango = set(fac.loc[fac['_orden_en_rango'], 'factura'])
+    fac = fac[fac['_orden_en_rango'] | fac['orden'].isna() | ~fac['factura'].isin(con_camion_rango)]
+
     # Si la factura quedó en un camión por un pedido, no repetirla "sin camión" por el otro pedido
     con_camion = set(fac.loc[fac['orden'].notna(), 'factura'])
     fac = fac[fac['orden'].notna() | ~fac['factura'].isin(con_camion)]
