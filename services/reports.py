@@ -295,7 +295,7 @@ def fetch_order_information_interval(start_date: str, end_date: str, emails: Lis
 
 CONSOLIDATED_COLUMNS = [
     'tipo', 'tipo_vehiculo', 'orden', 'fecha', 'cliente', 'placa', 'conductor', 'carroceria',
-    'tipo_carga', 'cantidad', 'referencia', 'producto', 'pedido', 'factura', 'pedido_factura', 'remision',
+    'tipo_carga', 'cantidad', 'referencia', 'producto', 'pedido', 'factura', 'remision',
     'estado', 'estado_orden',
 ] + ORDER_TIME_COLUMNS
 
@@ -319,24 +319,83 @@ def _summary_by(df_orders: pd.DataFrame, group_col: str) -> pd.DataFrame:
 
 def _asignar_facturas_despacho(df: pd.DataFrame, d0, d1):
     """Reemplaza la columna factura (todas las del pedido) por las facturas que salieron en
-    cada camión, según la fecha de factura en Zeus. Devuelve (df, hoja Facturas).
-    Si Zeus no responde, deja las facturas originales y lo avisa en la hoja Facturas."""
+    cada camión, según la fecha de factura en Zeus.
+    Devuelve (df, hoja Facturas, pares) con pares = {orden: [(pedido, factura), ...]}.
+    Si Zeus no responde, deja las facturas originales, pares = None y lo avisa en la hoja Facturas."""
     try:
         pedidos = {p for v in df['pedido'] for p in _split(v)}
         df_fact = fetch_facturas_zeus(pedidos)
         out_all = match_facturas(df, df_fact)
         por_orden = out_all.set_index('orden')
         df['factura'] = df['orden'].map(por_orden['factura_nueva']).fillna('')
-        df['pedido_factura'] = df['orden'].map(por_orden['pedido_factura']).fillna('')
-        return df, build_facturas(out_all, df_fact, d0, d1)
+        return df, build_facturas(out_all, df_fact, d0, d1), por_orden['pares'].to_dict()
     except Exception as e:
         print(f"Advertencia: no se pudo asignar facturas por despacho (Zeus): {e}")
-        df['pedido_factura'] = ''
         aviso = pd.DataFrame({'aviso': [
             f"No se pudo consultar Zeus ({e}). La columna factura del Consolidado muestra "
             f"todas las facturas de cada pedido, no solo las del despacho."
         ]})
-        return df, aviso
+        return df, aviso, None
+
+
+def _productos_por_pedido(pedidos) -> dict:
+    """{pedido: {códigos de producto}} desde ordersItems (Supabase)."""
+    pedidos = sorted({int(p) for p in pedidos})
+    out = {}
+    for i in range(0, len(pedidos), 200):
+        data = (supabase.table('ordersItems').select('order_id,item_code')
+                .in_('order_id', pedidos[i:i + 200]).execute().data or [])
+        for r in data:
+            out.setdefault(str(r['order_id']), set()).add(str(r['item_code'] or '').strip())
+    return out
+
+
+def _separar_pedido_factura(df_flat: pd.DataFrame, pares: dict) -> pd.DataFrame:
+    """Una fila por producto, pedido y factura (en vez de "p1, p2" / "f1, f2" en una celda).
+    - Orden con varios pedidos: el producto va con el pedido que lo contiene; si está en
+      varios (o en ninguno), se repite por cada pedido.
+    - La cantidad queda solo en la primera fila de cada producto, para que las sumas no dupliquen.
+    - Una factura de la orden que no quedó en ninguna fila (su pedido no tiene productos
+      identificables) se agrega en una fila sin cantidad."""
+    multi = df_flat.loc[df_flat['pedido'].str.contains(',', na=False), 'pedido']
+    items = _productos_por_pedido({p for v in multi for p in _split(v)}) if not multi.empty else {}
+
+    rows, vistas = [], {}
+    for rec in df_flat.to_dict('records'):
+        orden = rec['orden']
+        peds = _split(rec['pedido'])
+        if len(peds) > 1:
+            ref = str(rec.get('referencia') or '').strip()
+            con_ref = [p for p in peds if ref in items.get(p, set())]
+            if len(con_ref) == 1:
+                peds = con_ref
+        par_orden = pares.get(orden) or []
+        combos = []
+        for p in (peds or ['']):
+            facs = sorted({f for ped, f in par_orden if ped == p})
+            combos.extend((p, f) for f in (facs or ['']))
+        for k, (p, f) in enumerate(combos):
+            row = dict(rec, pedido=p, factura=f)
+            if k > 0:
+                row['cantidad'] = pd.NA
+            rows.append(row)
+            vistas.setdefault(orden, set()).add((p, f))
+
+    out = pd.DataFrame(rows, columns=df_flat.columns)
+    # Facturas asignadas a la orden que no quedaron en ninguna fila
+    extra = []
+    for orden, par_orden in pares.items():
+        if orden not in vistas:
+            continue
+        for p, f in par_orden:
+            if (p, f) not in vistas[orden]:
+                base = out[out['orden'] == orden].iloc[0].to_dict()
+                extra.append(dict(base, pedido=p, factura=f, cantidad=pd.NA, referencia='', producto=''))
+    if extra:
+        out = pd.concat([out, pd.DataFrame(extra, columns=out.columns)], ignore_index=True)
+        out = out.sort_values(['fecha', 'tipo', 'orden'], kind='stable').reset_index(drop=True)
+    out['cantidad'] = out['cantidad'].astype('Int64')
+    return out
 
 
 def fetch_consolidated_interval(start_date: str, end_date: str, emails: List[str]):
@@ -367,7 +426,7 @@ def fetch_consolidated_interval(start_date: str, end_date: str, emails: List[str
             if col in df.columns:
                 df[col] = df[col].apply(_join_list)
 
-        df, df_facturas = _asignar_facturas_despacho(df, start_obj.date(), end_obj.date())
+        df, df_facturas, pares = _asignar_facturas_despacho(df, start_obj.date(), end_obj.date())
 
         df = df[pd.to_datetime(df['fecha']).dt.date.between(start_obj.date(), end_obj.date())].copy()
         if df.empty:
@@ -390,9 +449,11 @@ def fetch_consolidated_interval(start_date: str, end_date: str, emails: List[str
         ).reset_index()
         df_estado.columns.name = None
 
-        # Hoja plana (una fila por producto)
+        # Hoja plana (una fila por producto; con Zeus, una por producto, pedido y factura)
         df_flat = df[[c for c in CONSOLIDATED_COLUMNS if c in df.columns]].copy()
-        df_flat = df_flat.sort_values(['fecha', 'tipo', 'orden']).reset_index(drop=True)
+        df_flat = df_flat.sort_values(['fecha', 'tipo', 'orden'], kind='stable').reset_index(drop=True)
+        if pares is not None:
+            df_flat = _separar_pedido_factura(df_flat, pares)
         df_flat = _format_hours(df_flat)
 
         now = datetime.now().strftime("%Y%m%d%H%M%S")
