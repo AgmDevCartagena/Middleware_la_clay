@@ -30,13 +30,29 @@ SQL_FACTURAS = """
 """
 
 
+# Remisiones del pedido con su fecha; se excluyen las revertidas y sus reversiones.
+SQL_REMISIONES = """
+    SELECT D.Exportador AS pedido, CAST(R.Consecutivo AS varchar) AS factura, R.Fecha AS fecha_factura
+    FROM DOCUMENTOSRELACIONADOS AS D
+    INNER JOIN Remision AS R ON D.Importador = R.Consecutivo
+    WHERE D.TipoImportador = 20 AND D.Exportador IN ({marks})
+      AND ISNULL(R.Estado, '') NOT IN ('Revertido', 'Reversion')
+"""
+
+
 def _split(value):
     if isinstance(value, list):
         return [str(v).strip() for v in value if v is not None]
     return [p.strip() for p in str(value or '').split(',') if p.strip()]
 
 
-def fetch_facturas_zeus(pedidos, chunk=500):
+def fetch_remisiones_zeus(pedidos, chunk=500):
+    """Remisiones (con fecha) de los pedidos dados, leídas de Zeus. Mismas columnas que
+    fetch_facturas_zeus (la remisión va en 'factura') para reutilizar la misma regla."""
+    return fetch_facturas_zeus(pedidos, chunk, sql=SQL_REMISIONES)
+
+
+def fetch_facturas_zeus(pedidos, chunk=500, sql=SQL_FACTURAS):
     """Facturas (con fecha) de los pedidos dados, leídas de Zeus."""
     pedidos = sorted({int(p) for p in pedidos})
     rows = []
@@ -44,7 +60,7 @@ def fetch_facturas_zeus(pedidos, chunk=500):
     try:
         for i in range(0, len(pedidos), chunk):
             part = pedidos[i:i + chunk]
-            data = query(conn=conn, sql=SQL_FACTURAS.format(marks=','.join('?' * len(part))), params=tuple(part))
+            data = query(conn=conn, sql=sql.format(marks=','.join('?' * len(part))), params=tuple(part))
             if isinstance(data, dict):
                 data = [data]
             rows.extend(data or [])

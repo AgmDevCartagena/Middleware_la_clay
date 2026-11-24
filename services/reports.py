@@ -8,7 +8,7 @@ from datetime import datetime,timedelta
 from typing import List
 from helpers.db_supabase import supabase
 from services.factura_despacho import (
-    MARGEN_DIAS, _split, fetch_facturas_zeus, match_facturas, build_facturas,
+    MARGEN_DIAS, _split, fetch_facturas_zeus, fetch_remisiones_zeus, match_facturas, build_facturas,
 )
 
 def fetch_trucks_control(date_ref,emails):
@@ -320,7 +320,9 @@ def _summary_by(df_orders: pd.DataFrame, group_col: str) -> pd.DataFrame:
 def _asignar_facturas_despacho(df: pd.DataFrame, d0, d1):
     """Reemplaza la columna factura (todas las del pedido) por las facturas que salieron en
     cada camión, según la fecha de factura en Zeus.
-    Devuelve (df, hoja Facturas, pares) con pares = {orden: [(pedido, factura), ...]}.
+    Lo mismo con la columna remision (remisiones de Zeus, sin revertidas).
+    Devuelve (df, hoja Facturas, pares) con
+    pares = {'factura': {orden: [(pedido, factura), ...]}, 'remision': {orden: [(pedido, remision), ...]}}.
     Si Zeus no responde, deja las facturas originales, pares = None y lo avisa en la hoja Facturas."""
     try:
         pedidos = {p for v in df['pedido'] for p in _split(v)}
@@ -328,12 +330,19 @@ def _asignar_facturas_despacho(df: pd.DataFrame, d0, d1):
         out_all = match_facturas(df, df_fact)
         por_orden = out_all.set_index('orden')
         df['factura'] = df['orden'].map(por_orden['factura_nueva']).fillna('')
-        return df, build_facturas(out_all, df_fact, d0, d1), por_orden['pares'].to_dict()
+
+        # Remisiones: misma regla por fecha (antes salían todas las del pedido)
+        df_rem = fetch_remisiones_zeus(pedidos)
+        rem_orden = match_facturas(df, df_rem).set_index('orden')
+        df['remision'] = df['orden'].map(rem_orden['factura_nueva']).fillna('')
+
+        pares = {'factura': por_orden['pares'].to_dict(), 'remision': rem_orden['pares'].to_dict()}
+        return df, build_facturas(out_all, df_fact, d0, d1), pares
     except Exception as e:
         print(f"Advertencia: no se pudo asignar facturas por despacho (Zeus): {e}")
         aviso = pd.DataFrame({'aviso': [
-            f"No se pudo consultar Zeus ({e}). La columna factura del Consolidado muestra "
-            f"todas las facturas de cada pedido, no solo las del despacho."
+            f"No se pudo consultar Zeus ({e}). Las columnas factura y remision del Consolidado "
+            f"muestran todos los documentos de cada pedido, no solo los del despacho."
         ]})
         return df, aviso, None
 
@@ -351,14 +360,20 @@ def _productos_por_pedido(pedidos) -> dict:
 
 
 def _separar_pedido_factura(df_flat: pd.DataFrame, pares: dict) -> pd.DataFrame:
-    """Una fila por producto, pedido y factura (en vez de "p1, p2" / "f1, f2" en una celda).
+    """Una fila por producto, pedido y documento (en vez de "p1, p2" / "f1, f2" en una celda).
     - Orden con varios pedidos: el producto va con el pedido que lo contiene; si está en
       varios (o en ninguno), se repite por cada pedido.
+    - Varias facturas/remisiones del mismo pedido: una fila por cada una; la 1a factura va
+      con la 1a remisión, la 2a con la 2a, etc.
     - La cantidad queda solo en la primera fila de cada producto, para que las sumas no dupliquen.
-    - Una factura de la orden que no quedó en ninguna fila (su pedido no tiene productos
+    - Un documento de la orden que no quedó en ninguna fila (su pedido no tiene productos
       identificables) se agrega en una fila sin cantidad."""
     multi = df_flat.loc[df_flat['pedido'].str.contains(',', na=False), 'pedido']
     items = _productos_por_pedido({p for v in multi for p in _split(v)}) if not multi.empty else {}
+    pf, pr = pares['factura'], pares['remision']
+
+    def _docs(par_orden, p):
+        return sorted({d for ped, d in (par_orden or []) if ped == p})
 
     rows, vistas = [], {}
     for rec in df_flat.to_dict('records'):
@@ -369,28 +384,32 @@ def _separar_pedido_factura(df_flat: pd.DataFrame, pares: dict) -> pd.DataFrame:
             con_ref = [p for p in peds if ref in items.get(p, set())]
             if len(con_ref) == 1:
                 peds = con_ref
-        par_orden = pares.get(orden) or []
         combos = []
         for p in (peds or ['']):
-            facs = sorted({f for ped, f in par_orden if ped == p})
-            combos.extend((p, f) for f in (facs or ['']))
-        for k, (p, f) in enumerate(combos):
-            row = dict(rec, pedido=p, factura=f)
+            facs, rems = _docs(pf.get(orden), p), _docs(pr.get(orden), p)
+            for i in range(max(len(facs), len(rems), 1)):
+                combos.append((p, facs[i] if i < len(facs) else '', rems[i] if i < len(rems) else ''))
+        for k, (p, f, r) in enumerate(combos):
+            row = dict(rec, pedido=p, factura=f, remision=r)
             if k > 0:
                 row['cantidad'] = pd.NA
             rows.append(row)
-            vistas.setdefault(orden, set()).add((p, f))
+            v = vistas.setdefault(orden, set())
+            v.add(('factura', p, f)); v.add(('remision', p, r))
 
     out = pd.DataFrame(rows, columns=df_flat.columns)
-    # Facturas asignadas a la orden que no quedaron en ninguna fila
+    # Documentos asignados a la orden que no quedaron en ninguna fila
     extra = []
-    for orden, par_orden in pares.items():
-        if orden not in vistas:
-            continue
-        for p, f in par_orden:
-            if (p, f) not in vistas[orden]:
-                base = out[out['orden'] == orden].iloc[0].to_dict()
-                extra.append(dict(base, pedido=p, factura=f, cantidad=pd.NA, referencia='', producto=''))
+    for col, par in (('factura', pf), ('remision', pr)):
+        for orden, par_orden in par.items():
+            if orden not in vistas:
+                continue
+            for p, d in par_orden:
+                if (col, p, d) not in vistas[orden]:
+                    base = out[out['orden'] == orden].iloc[0].to_dict()
+                    row = dict(base, pedido=p, factura='', remision='', cantidad=pd.NA, referencia='', producto='')
+                    row[col] = d
+                    extra.append(row)
     if extra:
         out = pd.concat([out, pd.DataFrame(extra, columns=out.columns)], ignore_index=True)
         out = out.sort_values(['fecha', 'tipo', 'orden'], kind='stable').reset_index(drop=True)
