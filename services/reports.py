@@ -295,7 +295,7 @@ def fetch_order_information_interval(start_date: str, end_date: str, emails: Lis
 
 CONSOLIDATED_COLUMNS = [
     'tipo', 'tipo_vehiculo', 'orden', 'fecha', 'cliente', 'placa', 'conductor', 'carroceria',
-    'tipo_carga', 'cantidad', 'referencia', 'producto', 'pedido', 'factura', 'remision',
+    'tipo_carga', 'cantidad', 'referencia', 'producto', 'pedido', 'factura', 'pedido_factura', 'remision',
     'estado', 'estado_orden',
 ] + ORDER_TIME_COLUMNS
 
@@ -325,10 +325,13 @@ def _asignar_facturas_despacho(df: pd.DataFrame, d0, d1):
         pedidos = {p for v in df['pedido'] for p in _split(v)}
         df_fact = fetch_facturas_zeus(pedidos)
         out_all = match_facturas(df, df_fact)
-        df['factura'] = df['orden'].map(out_all.set_index('orden')['factura_nueva']).fillna('')
+        por_orden = out_all.set_index('orden')
+        df['factura'] = df['orden'].map(por_orden['factura_nueva']).fillna('')
+        df['pedido_factura'] = df['orden'].map(por_orden['pedido_factura']).fillna('')
         return df, build_facturas(out_all, df_fact, d0, d1)
     except Exception as e:
         print(f"Advertencia: no se pudo asignar facturas por despacho (Zeus): {e}")
+        df['pedido_factura'] = ''
         aviso = pd.DataFrame({'aviso': [
             f"No se pudo consultar Zeus ({e}). La columna factura del Consolidado muestra "
             f"todas las facturas de cada pedido, no solo las del despacho."

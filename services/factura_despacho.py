@@ -81,7 +81,11 @@ def _assign_pedido(los: list, facts: list) -> list:
 
 
 def match_facturas(df_report: pd.DataFrame, df_fact: pd.DataFrame) -> pd.DataFrame:
-    """Una fila por orden con factura_nueva, dif_dias (factura - salida) y regla."""
+    """Una fila por orden con:
+    - factura_nueva: facturas del camión ("f1, f2")
+    - pedido_factura: cada factura con el pedido por el que se asignó ("ped1: f1 | ped2: f2")
+    - pares: lista [(pedido, factura)] para armar la hoja Facturas
+    - n_facturas y regla (diferencia en días factura - salida)."""
     orders = df_report.drop_duplicates(subset='orden').copy()
     salida = pd.to_datetime(orders['hora_salida'], errors='coerce', format='mixed')
     orders['dispatch_ts'] = salida.fillna(pd.to_datetime(orders['fecha']))
@@ -93,26 +97,26 @@ def match_facturas(df_report: pd.DataFrame, df_fact: pd.DataFrame) -> pd.DataFra
 
     facts_by_ped = {p: list(g.sort_values('factura')[['factura', 'fecha_factura']].itertuples(index=False, name=None))
                     for p, g in df_fact.groupby('pedido')}
-    pairs = []
+    pairs = []  # (orden, pedido, factura, dif)
     for ped, g in lp.groupby('pedido'):
         los = list(g[['orden', 'dispatch_day']].itertuples(index=False, name=None))
-        pairs.extend(_assign_pedido(los, facts_by_ped.get(ped, [])))
+        pairs.extend((o, ped, f, d) for o, f, d in _assign_pedido(los, facts_by_ped.get(ped, [])))
     # Paso 3: una factura puede cubrir varios viajes. Orden sin factura -> la última factura
     # de su pedido emitida hasta el día de salida (o la primera posterior), aunque ya esté
     # en otro camión. Si el pedido tiene una sola factura, todas sus órdenes la llevan.
     con_factura = {p[0] for p in pairs}
     for orden, g in lp[~lp['orden'].isin(con_factura)].groupby('orden'):
         day = g['dispatch_day'].iloc[0]
-        cands = [f for ped in g['pedido'] for f in facts_by_ped.get(ped, [])]
-        antes = [f for f in cands if f[1] <= day]
+        cands = [(ped, f) for ped in g['pedido'] for f in facts_by_ped.get(ped, [])]
+        antes = [c for c in cands if c[1][1] <= day]
         if antes:
-            fac, fdate = max(antes, key=lambda f: (f[1], f[0]))
+            ped, (fac, fdate) = max(antes, key=lambda c: (c[1][1], c[1][0]))
         elif cands:
-            fac, fdate = min(cands, key=lambda f: (f[1], f[0]))
+            ped, (fac, fdate) = min(cands, key=lambda c: (c[1][1], c[1][0]))
         else:
             continue
-        pairs.append((orden, fac, (fdate - day).days))
-    m = pd.DataFrame(pairs, columns=['orden', 'factura', 'dif'])
+        pairs.append((orden, ped, fac, (fdate - day).days))
+    m = pd.DataFrame(pairs, columns=['orden', 'pedido', 'factura', 'dif'])
 
     def _regla(s):
         difs = sorted(set(s))
@@ -120,11 +124,24 @@ def match_facturas(df_report: pd.DataFrame, df_fact: pd.DataFrame) -> pd.DataFra
             return 'MISMO DIA'
         return 'DIA ' + ', '.join(f'{d:+d}' for d in difs)
 
-    agg = m.groupby('orden').agg(
-        factura_nueva=('factura', lambda s: ', '.join(sorted(set(s)))),
-        n_facturas=('factura', 'nunique'),
-        regla=('dif', _regla),
-    ).reset_index() if not m.empty else pd.DataFrame(columns=['orden', 'factura_nueva', 'n_facturas', 'regla'])
+    def _por_pedido(g):
+        return ' | '.join(f"{ped}: {', '.join(sorted(set(gp['factura'])))}"
+                          for ped, gp in g.groupby('pedido', sort=True))
+
+    if m.empty:
+        agg = pd.DataFrame(columns=['orden', 'factura_nueva', 'pedido_factura', 'pares', 'n_facturas', 'regla'])
+    else:
+        rows = []
+        for orden, g in m.groupby('orden'):
+            rows.append({
+                'orden': orden,
+                'factura_nueva': ', '.join(sorted(set(g['factura']))),
+                'pedido_factura': _por_pedido(g),
+                'pares': sorted(set(zip(g['pedido'], g['factura']))),
+                'n_facturas': g['factura'].nunique(),
+                'regla': _regla(g['dif']),
+            })
+        agg = pd.DataFrame(rows)
 
     out = orders[['tipo', 'orden', 'fecha', 'placa', 'pedido', 'estado', 'hora_salida', 'factura']].rename(
         columns={'factura': 'factura_actual'})
@@ -132,47 +149,41 @@ def match_facturas(df_report: pd.DataFrame, df_fact: pd.DataFrame) -> pd.DataFra
     out['regla'] = out['regla'].fillna(out['estado'].map(
         lambda e: 'CANCELADA' if e == 'CANCELADA' else f'SIN FACTURA (±{MAX_DIF_DIAS} dias)'))
     out['factura_nueva'] = out['factura_nueva'].fillna('')
+    out['pedido_factura'] = out['pedido_factura'].fillna('')
+    out['pares'] = out['pares'].apply(lambda v: v if isinstance(v, list) else [])
     out['n_facturas'] = out['n_facturas'].fillna(0).astype(int)
     return out
 
 
 def build_facturas(out_all: pd.DataFrame, df_fact: pd.DataFrame, d0, d1) -> pd.DataFrame:
-    """Una fila por factura con el camión (orden/placa) en que salió.
+    """Una fila por (factura, pedido, camión): el pedido es el de la orden por el que se asignó.
     Incluye las facturas con fecha en el rango y las asignadas a órdenes del rango
-    (la factura puede ser del día antes/después del despacho). Sin camión -> placa vacía."""
-    # factura -> orden asignada (cada factura queda en una sola orden)
-    asign = out_all[['orden', 'placa', 'hora_salida', 'fecha', 'pedido', 'factura_nueva']].copy()
-    asign['factura'] = asign['factura_nueva'].apply(_split)
-    asign['pedido'] = asign['pedido'].apply(_split)
-    asign = asign.explode('factura').dropna(subset=['factura']).explode('pedido')
-    asign = asign.drop(columns='factura_nueva').rename(columns={'fecha': 'fecha_orden', 'hora_salida': 'salida'})
+    (la factura puede ser del día antes/después del despacho). Sin camión -> orden/placa vacías."""
+    fechas = df_fact.drop_duplicates(subset=['pedido', 'factura'])
 
-    # Cruce por (pedido, factura): una factura puede cubrir varios pedidos del mismo camión
-    fac = df_fact.drop_duplicates(subset=['pedido', 'factura']).merge(asign, on=['pedido', 'factura'], how='left')
-    en_rango = pd.to_datetime(fac['fecha_factura']).dt.date.between(d0, d1)
-    orden_en_rango = pd.to_datetime(fac['fecha_orden']).dt.date.between(d0, d1)
-    fac = fac[en_rango | orden_en_rango].copy()
+    asign = out_all[['orden', 'placa', 'hora_salida', 'fecha', 'pares']].explode('pares').dropna(subset=['pares'])
+    asign['pedido'] = asign['pares'].str[0]
+    asign['factura'] = asign['pares'].str[1]
+    asign = asign.drop(columns='pares').merge(fechas, on=['pedido', 'factura'], how='left')
 
-    # Camiones de fuera del rango (margen) solo si la factura no salió en ningún camión del rango
-    fac['_orden_en_rango'] = orden_en_rango.loc[fac.index].fillna(False)
-    con_camion_rango = set(fac.loc[fac['_orden_en_rango'], 'factura'])
-    fac = fac[fac['_orden_en_rango'] | fac['orden'].isna() | ~fac['factura'].isin(con_camion_rango)]
+    orden_en_rango = pd.to_datetime(asign['fecha']).dt.date.between(d0, d1)
+    fac_en_rango = pd.to_datetime(asign['fecha_factura']).dt.date.between(d0, d1)
+    # Camiones del margen solo si la factura (del rango) no salió en ningún camión del rango
+    con_camion_rango = set(asign.loc[orden_en_rango, 'factura'])
+    asign = asign[orden_en_rango | (fac_en_rango & ~asign['factura'].isin(con_camion_rango))]
 
-    # Si la factura quedó en un camión por un pedido, no repetirla "sin camión" por el otro pedido
-    con_camion = set(fac.loc[fac['orden'].notna(), 'factura'])
-    fac = fac[fac['orden'].notna() | ~fac['factura'].isin(con_camion)]
+    # Facturas del rango que no salieron en ningún camión: una fila por pedido, sin camión
+    sin_camion = fechas[pd.to_datetime(fechas['fecha_factura']).dt.date.between(d0, d1)
+                        & ~fechas['factura'].isin(set(asign['factura']))]
 
-    fac['orden'] = fac['orden'].apply(lambda v: '' if pd.isna(v) else str(int(float(v))))
-    fac = fac.fillna({'placa': '', 'salida': ''})
-    fac = (fac.groupby(['factura', 'orden'], as_index=False)
-              .agg(fecha_factura=('fecha_factura', 'first'),
-                   placa=('placa', 'first'),
-                   salida=('salida', 'first')))
-    # Todos los pedidos que cubre la factura (según Zeus)
-    pedidos_fac = df_fact.groupby('factura')['pedido'].agg(lambda s: ', '.join(sorted(set(s))))
-    fac['pedido'] = fac['factura'].map(pedidos_fac)
-    fac = fac.sort_values(['fecha_factura', 'factura', 'salida'])
-    fac['salida'] = pd.to_datetime(fac['salida'], errors='coerce', format='mixed').dt.strftime('%d/%m/%Y %H:%M')
+    fac = pd.concat([
+        asign.rename(columns={'hora_salida': 'salida'})[['factura', 'fecha_factura', 'pedido', 'orden', 'placa', 'salida']],
+        sin_camion[['factura', 'fecha_factura', 'pedido']],
+    ], ignore_index=True)
+    fac['orden'] = fac['orden'].apply(lambda v: '' if pd.isna(v) or v == '' else str(int(float(v))))
+    fac['salida'] = pd.to_datetime(fac['salida'], errors='coerce', format='mixed')
+    fac = fac.sort_values(['fecha_factura', 'factura', 'pedido', 'salida'], na_position='last')
+    fac['salida'] = fac['salida'].dt.strftime('%d/%m/%Y %H:%M')
     fac['fecha_factura'] = pd.to_datetime(fac['fecha_factura']).dt.strftime('%d/%m/%Y')
     return fac[['factura', 'fecha_factura', 'pedido', 'orden', 'placa', 'salida']].fillna('').reset_index(drop=True)
 
