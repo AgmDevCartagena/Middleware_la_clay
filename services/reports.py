@@ -294,9 +294,9 @@ def fetch_order_information_interval(start_date: str, end_date: str, emails: Lis
 #get_consolidated_report_interval
 
 CONSOLIDATED_COLUMNS = [
-    'factura', 'pedido',
+    'factura', 'remision', 'pedido',
     'tipo', 'tipo_vehiculo', 'orden', 'fecha', 'cliente', 'placa', 'conductor', 'carroceria',
-    'tipo_carga', 'cantidad', 'referencia', 'producto', 'remision',
+    'tipo_carga', 'cantidad', 'referencia', 'producto',
     'estado', 'estado_orden',
 ] + ORDER_TIME_COLUMNS
 
